@@ -1,6 +1,8 @@
 """
-Trader Bot - Minimalist crypto trading.
-Usage: python main.py --limit 1000
+Trader Bot
+  Paper:  python main.py --limit 1000
+  Live:   python main.py --limit 1000 --live
+  + UI:   python main.py --limit 1000 --dashboard
 """
 
 import asyncio
@@ -10,17 +12,22 @@ import sys
 import os
 import yaml
 
+# Load .env before anything else
+from dotenv import load_dotenv
+load_dotenv()
+
 os.makedirs("logs", exist_ok=True)
 
 DEFAULT_CONFIG = {
     "capital": 1000,
-    "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "AVAX/USDT"],
+    "symbols": [
+        "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "AVAX/USDT",
+        "ADA/USDT", "DOGE/USDT", "LINK/USDT",
+    ],
     "timeframe": "1h",
     "scan_interval": 60,
     "max_positions": 5,
     "risk_per_trade": 0.05,
-    "stop_loss": 0.02,
-    "take_profit": 0.04,
     "max_daily_loss": 0.05,
 }
 
@@ -38,7 +45,8 @@ async def main():
     parser = argparse.ArgumentParser(description="Trader Bot")
     parser.add_argument("--limit", type=float, default=1000, help="Capital in USD")
     parser.add_argument("--config", default="config.yaml", help="Config file")
-    parser.add_argument("--dashboard", action="store_true", help="Web dashboard on localhost")
+    parser.add_argument("--live", action="store_true", help="Live trading (requires .env)")
+    parser.add_argument("--dashboard", action="store_true", help="Web dashboard")
     parser.add_argument("--port", type=int, default=8080, help="Dashboard port")
     args = parser.parse_args()
 
@@ -57,11 +65,28 @@ async def main():
 
     config = load_config(args.config)
     config["capital"] = args.limit
+    config["live"] = args.live
 
-    log.info(f"Capital: ${args.limit:,.0f}")
-    log.info(f"Symbols: {', '.join(config['symbols'])}")
-    log.info(f"Strategy: EMA(9/21/50) + RSI(14) + Volume")
-    log.info(f"Risk: {config['risk_per_trade']*100:.0f}% per trade, SL {config['stop_loss']*100:.0f}%, TP {config['take_profit']*100:.0f}%")
+    # Load API keys from .env
+    config["binance_api_key"] = os.getenv("BINANCE_API_KEY", "")
+    config["binance_secret"] = os.getenv("BINANCE_SECRET", "")
+
+    mode = "LIVE" if args.live else "PAPER"
+    log.info("=" * 45)
+    log.info(f"  Mode:     {mode}")
+    log.info(f"  Capital:  ${args.limit:,.0f}")
+    log.info(f"  Symbols:  {len(config['symbols'])} pairs")
+    log.info(f"  Strategy: EMA + RSI + MACD + ATR stops")
+    log.info(f"  Risk:     {config['risk_per_trade']*100:.0f}% per trade")
+    log.info(f"  API key:  {'loaded' if config['binance_api_key'] else 'none'}")
+    log.info("=" * 45)
+
+    if args.live and not config["binance_api_key"]:
+        log.error("Live mode requires BINANCE_API_KEY and BINANCE_SECRET in .env file")
+        log.error("Create a .env file with:")
+        log.error("  BINANCE_API_KEY=your_key")
+        log.error("  BINANCE_SECRET=your_secret")
+        return
 
     from bot.engine import Engine
     engine = Engine(config)

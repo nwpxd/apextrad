@@ -6,13 +6,19 @@ symbols:
   - SOL/USDT
   - BNB/USDT
   - AVAX/USDT
+  - ADA/USDT
+  - DOGE/USDT
+  - LINK/USDT
 
 timeframe: "1h"
-scan_interval: 60        # seconds between scans
+scan_interval: 60          # seconds between scans
 
-# Risk
-max_positions: 5
-risk_per_trade: 0.05     # 5% of portfolio per trade
-stop_loss: 0.02          # 2% stop-loss
-take_profit: 0.04        # 4% take-profit (2:1 R/R)
-max_daily_loss: 0.05     # halt if down 5% in a day
+# Risk management
+max_positions: 5           # max simultaneous positions
+risk_per_trade: 0.05       # 5% of portfolio per trade
+max_daily_loss: 0.05       # halt trading if down 5% in a day
+
+# Stop-loss and take-profit are dynamic (ATR-based):
+#   SL = entry - 2x ATR  (adapts to volatility)
+#   TP = entry + 4x ATR  (2:1 risk/reward ratio)
+#   Trailing stop activates after 2x ATR profit

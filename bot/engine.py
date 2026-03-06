@@ -17,10 +17,15 @@ log = logging.getLogger("engine")
 class Engine:
     def __init__(self, config: dict):
         self.config = config
-        self.market = Market()
+        self.market = Market(
+            api_key=config.get("binance_api_key", ""),
+            secret=config.get("binance_secret", ""),
+            live=config.get("live", False),
+        )
         self.portfolio = Portfolio(config["capital"])
         self.tracker = Tracker()
         self.running = False
+        self.live = config.get("live", False)
 
         # State
         self.daily_pnl = Decimal("0")
@@ -33,10 +38,18 @@ class Engine:
     async def start(self):
         self.running = True
         await self.market.connect()
-        log.info("Engine started")
+
+        mode = "LIVE" if self.live else "PAPER"
+        log.info(f"Engine started [{mode}]")
+
+        if self.live and not self.config.get("binance_api_key"):
+            log.error("LIVE mode requires BINANCE_API_KEY and BINANCE_SECRET in .env")
+            self.running = False
+            return
 
         tasks = [
             asyncio.create_task(self._loop()),
+            asyncio.create_task(self._stop_checker()),
             asyncio.create_task(self._monitor()),
         ]
         try:
@@ -50,16 +63,17 @@ class Engine:
         log.info("Engine stopped")
 
     async def _loop(self):
+        """Main trading loop."""
         interval = self.config.get("scan_interval", 60)
         symbols = self.config["symbols"]
 
         while self.running:
             self._reset_daily()
 
-            # Check daily loss limit
+            # Daily loss limit
             max_loss = self.portfolio.initial * Decimal(str(self.config.get("max_daily_loss", 0.05)))
             if self.daily_pnl < -max_loss:
-                log.warning(f"Daily loss limit hit (${self.daily_pnl:,.2f}). Pausing.")
+                log.warning(f"Daily loss limit hit (${self.daily_pnl:,.2f}). Pausing 1h.")
                 await asyncio.sleep(3600)
                 continue
 
@@ -75,6 +89,24 @@ class Engine:
 
             await asyncio.sleep(interval)
 
+    async def _stop_checker(self):
+        """Check stop-losses every 15 seconds (faster than main loop)."""
+        while self.running:
+            for symbol in list(self.portfolio.positions.keys()):
+                try:
+                    price_now = await self.market.price(symbol)
+                    if price_now is None:
+                        continue
+                    price = Decimal(str(price_now))
+                    self.portfolio.update_price(symbol, price)
+
+                    stop_reason = self.portfolio.check_stops(symbol, price)
+                    if stop_reason:
+                        await self._execute_sell(symbol, price, stop_reason)
+                except Exception as e:
+                    log.debug(f"Stop check error {symbol}: {e}")
+            await asyncio.sleep(15)
+
     async def _evaluate(self, symbol: str):
         # Get data
         df = await self.market.ohlcv(symbol, self.config.get("timeframe", "1h"), limit=100)
@@ -88,13 +120,6 @@ class Engine:
         price = Decimal(str(price_now))
         self.portfolio.update_price(symbol, price)
 
-        # Check stops first
-        stop_reason = self.portfolio.check_stops(symbol, price)
-        if stop_reason:
-            pnl = self.portfolio.sell(symbol, price, stop_reason)
-            self._record_sell(symbol, price, pnl, stop_reason)
-            return
-
         # Run strategy
         sig = strategy.signal(df)
 
@@ -107,14 +132,17 @@ class Engine:
             "reason": sig["reason"],
         })
 
+        # BUY
         if sig["action"] == "BUY" and symbol not in self.portfolio.positions:
-            self._try_buy(symbol, price, sig)
+            if self.portfolio.is_on_cooldown(symbol):
+                return
+            await self._execute_buy(symbol, price, sig)
 
+        # SELL (strategy says sell)
         elif sig["action"] == "SELL" and symbol in self.portfolio.positions:
-            pnl = self.portfolio.sell(symbol, price, sig["reason"])
-            self._record_sell(symbol, price, pnl, sig["reason"])
+            await self._execute_sell(symbol, price, sig["reason"])
 
-    def _try_buy(self, symbol: str, price: Decimal, sig: dict):
+    async def _execute_buy(self, symbol: str, price: Decimal, sig: dict):
         from bot.risk import position_size
 
         size = position_size(
@@ -127,23 +155,43 @@ class Engine:
         if size is None:
             return
 
-        self.portfolio.buy(
-            symbol, price, size,
-            stop_pct=self.config.get("stop_loss", 0.02),
-            tp_pct=self.config.get("take_profit", 0.04),
-        )
+        atr_val = sig.get("atr", float(price) * 0.02)
+
+        ok = self.portfolio.buy(symbol, price, size, atr=atr_val)
+        if not ok:
+            return
+
         self.trades_today += 1
 
-    def _record_sell(self, symbol: str, price: Decimal, pnl: Decimal, reason: str):
+        # Execute real order in live mode
+        if self.live:
+            pos = self.portfolio.positions.get(symbol)
+            if pos:
+                await self.market.market_buy(symbol, float(pos["quantity"]))
+
+    async def _execute_sell(self, symbol: str, price: Decimal, reason: str):
+        pos = self.portfolio.positions.get(symbol)
+        if not pos:
+            return
+
+        quantity = float(pos["quantity"])
+        entry = float(pos["entry"])
+
+        pnl = self.portfolio.sell(symbol, price, reason)
         self.daily_pnl += pnl
         self.trades_today += 1
+
         self.tracker.record(
             symbol=symbol,
-            entry=0,  # already logged in portfolio
+            entry=entry,
             exit_price=float(price),
             pnl=float(pnl),
             reason=reason,
         )
+
+        # Execute real order in live mode
+        if self.live:
+            await self.market.market_sell(symbol, quantity)
 
     def _reset_daily(self):
         today = date.today()

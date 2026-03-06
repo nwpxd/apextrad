@@ -5,6 +5,7 @@ Orchestrates all strategies, manages risk, executes trades.
 
 import asyncio
 import logging
+from collections import deque
 from decimal import Decimal
 from datetime import datetime, date
 from typing import Dict, List, Optional, Callable
@@ -60,6 +61,8 @@ class TradingAgent:
         self.on_signal: Optional[Callable] = None
         # Last regime detected (for TUI display)
         self.current_regime: str = "unknown"
+        # Signal buffer for dashboard WebSocket
+        self._dashboard_signals: deque = deque(maxlen=50)
 
     async def run(self):
         """Main event loop."""
@@ -168,16 +171,18 @@ class TradingAgent:
         self.current_regime = decision.get("regime", self.current_regime)
         log.info(f"  {symbol}: decision={decision['action']} reason={decision['reason']}")
 
-        # Notify TUI of signal
+        # Notify TUI + dashboard of signal
+        sig_data = {
+            "time": datetime.now(),
+            "action": decision["action"],
+            "symbol": symbol,
+            "score": decision.get("score", 0),
+            "regime": self.current_regime,
+            "reason": decision.get("reason", ""),
+        }
+        self._dashboard_signals.append(sig_data)
         if self.on_signal:
-            self.on_signal({
-                "time": datetime.now(),
-                "action": decision["action"],
-                "symbol": symbol,
-                "score": decision.get("score", 0),
-                "regime": self.current_regime,
-                "reason": decision.get("reason", ""),
-            })
+            self.on_signal(sig_data)
 
         if decision["action"] == "BUY":
             await self._execute_buy(symbol, current_price, decision)

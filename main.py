@@ -31,6 +31,8 @@ async def main():
     parser.add_argument("--mode", choices=["live", "paper"], default="paper")
     parser.add_argument("--config", default="config/settings.yaml")
     parser.add_argument("--no-tui", action="store_true", help="Headless mode (no terminal UI)")
+    parser.add_argument("--dashboard", action="store_true", help="Launch web dashboard on localhost:8080")
+    parser.add_argument("--port", type=int, default=8080, help="Dashboard port (default: 8080)")
     args = parser.parse_args()
 
     # Set up logging: file always, console only in headless mode
@@ -51,6 +53,7 @@ async def main():
     log.info(f"  Limit  : ${args.limit:,.2f}")
     log.info(f"  Mode   : {args.mode.upper()}")
     log.info(f"  TUI    : {'OFF' if args.no_tui else 'ON'}")
+    log.info(f"  Web UI : {'http://localhost:' + str(args.port) if args.dashboard else 'OFF'}")
     log.info("=" * 50)
 
     settings = Settings.load(args.config)
@@ -60,6 +63,12 @@ async def main():
 
     agent = TradingAgent(settings)
     tasks = [asyncio.create_task(agent.run())]
+
+    if args.dashboard:
+        from dashboard_api import DashboardServer
+        dashboard = DashboardServer(agent, port=args.port)
+        tasks.append(asyncio.create_task(dashboard.run()))
+        log.info(f"[OK] Dashboard will be at http://localhost:{args.port}")
 
     if not args.no_tui:
         from tui import TUI, TUILogHandler

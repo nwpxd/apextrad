@@ -1,4 +1,4 @@
-# 🤖 APEX TRADER v2 — Fully Automated AI Trading System
+# — Fully Automated AI Trading System
 
 Multi-strategy, multi-market AI trading agent with backtesting, on-chain analysis,
 order book depth signals, real-time performance tracking, and a live dashboard.

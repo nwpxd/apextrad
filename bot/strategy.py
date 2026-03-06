@@ -3,20 +3,23 @@ Signal engine with market regime detection.
 
 Indicators:
   - EMA crossover (9/21) + trend filter (EMA50)
-  - RSI(14) with divergence detection
+  - RSI(14) with swing-based divergence detection
   - MACD histogram momentum
   - ADX(14) for regime detection (trending vs ranging)
   - Bollinger Bands squeeze for breakout anticipation
-  - Volume confirmation
+  - Volume confirmation + minimum volume filter
   - Higher timeframe trend filter
 """
 
 import numpy as np
 import pandas as pd
 
-# Scoring thresholds
+# Default scoring thresholds (overridable via config)
 BUY_SCORE = 0.35
 SELL_SCORE = -0.30
+
+# Minimum volume ratio to accept a signal (vs 20-period average)
+MIN_VOLUME_RATIO = 0.30
 
 
 # ── Indicator functions ──
@@ -109,7 +112,8 @@ def bollinger_bands(series: pd.Series, period: int = 20, std: float = 2.0) -> di
     bw_avg = float(bandwidth.rolling(50).mean().iloc[-1]) if len(bandwidth) >= 50 else bw_current
 
     price = float(series.iloc[-1])
-    pct_b = (price - float(lower.iloc[-1])) / (float(upper.iloc[-1]) - float(lower.iloc[-1])) if float(upper.iloc[-1]) != float(lower.iloc[-1]) else 0.5
+    band_width = float(upper.iloc[-1]) - float(lower.iloc[-1])
+    pct_b = (price - float(lower.iloc[-1])) / band_width if band_width > 0 else 0.5
 
     squeeze = bw_current < bw_avg * 0.75
 
@@ -123,40 +127,75 @@ def bollinger_bands(series: pd.Series, period: int = 20, std: float = 2.0) -> di
     }
 
 
-def detect_rsi_divergence(close: pd.Series, lookback: int = 14) -> str:
-    """Detect bullish or bearish RSI divergence."""
-    if len(close) < lookback * 3:
+def _find_swing_lows(series: pd.Series, order: int = 3) -> list[tuple[int, float]]:
+    """Find swing lows: points lower than `order` neighbors on each side."""
+    swings = []
+    values = series.values
+    for i in range(order, len(values) - order):
+        is_low = True
+        for j in range(1, order + 1):
+            if values[i] >= values[i - j] or values[i] >= values[i + j]:
+                is_low = False
+                break
+        if is_low:
+            swings.append((i, float(values[i])))
+    return swings
+
+
+def _find_swing_highs(series: pd.Series, order: int = 3) -> list[tuple[int, float]]:
+    """Find swing highs: points higher than `order` neighbors on each side."""
+    swings = []
+    values = series.values
+    for i in range(order, len(values) - order):
+        is_high = True
+        for j in range(1, order + 1):
+            if values[i] <= values[i - j] or values[i] <= values[i + j]:
+                is_high = False
+                break
+        if is_high:
+            swings.append((i, float(values[i])))
+    return swings
+
+
+def detect_rsi_divergence(close: pd.Series, lookback: int = 30, min_gap: int = 5) -> str:
+    """
+    Detect bullish/bearish RSI divergence using real swing points.
+    Requires at least `min_gap` candles between swings to avoid noise.
+    """
+    if len(close) < lookback + 20:
         return "none"
 
-    rsi_vals = rsi_series(close)
-    prices = close.iloc[-lookback * 2:]
-    rsi_v = rsi_vals.iloc[-lookback * 2:]
+    prices = close.iloc[-lookback:]
+    rsi_vals = rsi_series(close).iloc[-lookback:]
 
-    mid = len(prices) // 2
+    # Bullish divergence: 2 swing lows, price lower but RSI higher
+    price_lows = _find_swing_lows(prices, order=3)
+    rsi_lows = _find_swing_lows(rsi_vals, order=3)
 
-    price_low1 = prices.iloc[:mid].min()
-    price_low2 = prices.iloc[mid:].min()
-    rsi_low1 = rsi_v.iloc[:mid].min()
-    rsi_low2 = rsi_v.iloc[mid:].min()
+    if len(price_lows) >= 2 and len(rsi_lows) >= 2:
+        pl1, pl2 = price_lows[-2], price_lows[-1]
+        rl1, rl2 = rsi_lows[-2], rsi_lows[-1]
+        if (pl2[0] - pl1[0] >= min_gap and
+                pl2[1] < pl1[1] and  # lower price low
+                rl2[1] > rl1[1]):    # higher RSI low
+            return "bullish"
 
-    # Bullish divergence: lower price low, higher RSI low
-    if price_low2 < price_low1 and rsi_low2 > rsi_low1:
-        return "bullish"
+    # Bearish divergence: 2 swing highs, price higher but RSI lower
+    price_highs = _find_swing_highs(prices, order=3)
+    rsi_highs = _find_swing_highs(rsi_vals, order=3)
 
-    price_high1 = prices.iloc[:mid].max()
-    price_high2 = prices.iloc[mid:].max()
-    rsi_high1 = rsi_v.iloc[:mid].max()
-    rsi_high2 = rsi_v.iloc[mid:].max()
-
-    # Bearish divergence: higher price high, lower RSI high
-    if price_high2 > price_high1 and rsi_high2 < rsi_high1:
-        return "bearish"
+    if len(price_highs) >= 2 and len(rsi_highs) >= 2:
+        ph1, ph2 = price_highs[-2], price_highs[-1]
+        rh1, rh2 = rsi_highs[-2], rsi_highs[-1]
+        if (ph2[0] - ph1[0] >= min_gap and
+                ph2[1] > ph1[1] and  # higher price high
+                rh2[1] < rh1[1]):    # lower RSI high
+            return "bearish"
 
     return "none"
 
 
 def detect_regime(adx_val: float, config: dict) -> str:
-    """Classify market regime based on ADX."""
     if adx_val >= config.get("adx_trend_threshold", 25):
         return "trending"
     elif adx_val <= config.get("adx_range_threshold", 20):
@@ -165,7 +204,6 @@ def detect_regime(adx_val: float, config: dict) -> str:
 
 
 def htf_trend(df_htf: pd.DataFrame | None) -> str:
-    """Determine higher timeframe trend direction."""
     if df_htf is None or len(df_htf) < 50:
         return "neutral"
 
@@ -198,6 +236,13 @@ def signal(df: pd.DataFrame, config: dict | None = None, df_htf: pd.DataFrame | 
 
     current_atr = atr(df)
     price = float(close.iloc[-1])
+
+    # ── Volume minimum filter ──
+    avg_vol = vol.rolling(20).mean().iloc[-1]
+    vol_ratio = vol.iloc[-1] / avg_vol if avg_vol > 0 else 1.0
+    min_vol = config.get("min_volume_ratio", MIN_VOLUME_RATIO)
+    if vol_ratio < min_vol:
+        return _hold(f"low volume ({vol_ratio:.2f}x)", current_atr, "unknown", "neutral")
 
     # ── Market regime ──
     adx_val = adx(df, config.get("adx_period", 14))
@@ -250,7 +295,7 @@ def signal(df: pd.DataFrame, config: dict | None = None, df_htf: pd.DataFrame | 
     else:
         rsi_score = 0.0
 
-    # RSI divergence bonus
+    # RSI divergence bonus (swing-based)
     divergence = detect_rsi_divergence(close)
     if divergence == "bullish":
         rsi_score += 0.10
@@ -259,8 +304,8 @@ def signal(df: pd.DataFrame, config: dict | None = None, df_htf: pd.DataFrame | 
 
     # ── MACD ── (0.20 max)
     _, _, hist = macd(close)
-    macd_line = ema(close, 12) - ema(close, 26)
-    hist_prev = float(macd_line.iloc[-2] - ema(macd_line, 9).iloc[-2])
+    macd_l = ema(close, 12) - ema(close, 26)
+    hist_prev = float(macd_l.iloc[-2] - ema(macd_l, 9).iloc[-2])
 
     if hist > 0 and hist > hist_prev:
         macd_score = 0.20
@@ -274,22 +319,19 @@ def signal(df: pd.DataFrame, config: dict | None = None, df_htf: pd.DataFrame | 
         macd_score = 0.0
 
     # ── Volume ── (multiplier 0.6 - 1.4)
-    avg_vol = vol.rolling(20).mean().iloc[-1]
-    vol_ratio = vol.iloc[-1] / avg_vol if avg_vol > 0 else 1.0
     vol_mult = min(1.4, max(0.6, 0.4 + vol_ratio * 0.5))
 
     # ── Bollinger Bands bonus ── (0.15 max)
     bb_score = 0.0
     if bb["squeeze"]:
-        # Squeeze = volatility compression, breakout incoming
         if cross_bull or (e9 > e21_v and hist > 0):
-            bb_score = 0.15  # expect upside breakout
+            bb_score = 0.15
         elif cross_bear or (e9 < e21_v and hist < 0):
-            bb_score = -0.15  # expect downside breakout
+            bb_score = -0.15
     elif bb["pct_b"] < 0.05:
-        bb_score = 0.10  # price touching lower band (potential bounce)
+        bb_score = 0.10
     elif bb["pct_b"] > 0.95:
-        bb_score = -0.10  # price touching upper band (potential reversal)
+        bb_score = -0.10
 
     # ── Composite score ──
     raw_score = cross_score + rsi_score + macd_score + bb_score
@@ -297,27 +339,24 @@ def signal(df: pd.DataFrame, config: dict | None = None, df_htf: pd.DataFrame | 
 
     # ── Regime-based adjustments ──
     if regime == "ranging":
-        # In range: reduce trend signals, favor mean-reversion
         if abs(score) < 0.5:
-            score *= 0.6  # weaken marginal signals
-        # But allow strong mean-reversion signals (RSI extremes + BB touch)
+            score *= 0.6
         if r < 25 and bb["pct_b"] < 0.1:
-            score = max(score, 0.35)  # force buy near lower BB in range
+            score = max(score, 0.35)
         elif r > 75 and bb["pct_b"] > 0.9:
-            score = min(score, -0.30)  # force sell near upper BB in range
+            score = min(score, -0.30)
 
     elif regime == "trending":
-        # In trend: boost aligned signals
         if strong_uptrend and score > 0:
             score *= 1.20
 
     # ── Higher timeframe filter ──
     if htf == "bearish" and score > 0:
-        score *= 0.5  # halve buy signals against HTF trend
+        score *= 0.5
     elif htf == "bullish" and score < 0:
-        score *= 0.5  # halve sell signals against HTF trend
+        score *= 0.5
     elif htf == "bullish" and score > 0:
-        score *= 1.10  # slight boost when aligned with HTF
+        score *= 1.10
 
     # Block buys in downtrend (unless strong mean-reversion in range)
     if not uptrend and regime != "ranging":
@@ -349,9 +388,13 @@ def signal(df: pd.DataFrame, config: dict | None = None, df_htf: pd.DataFrame | 
 
     reason = " | ".join(parts)
 
-    if score >= BUY_SCORE:
+    # Configurable thresholds
+    buy_threshold = config.get("buy_score", BUY_SCORE)
+    sell_threshold = config.get("sell_score", SELL_SCORE)
+
+    if score >= buy_threshold:
         return {"action": "BUY", "score": score, "reason": reason, "atr": current_atr, "regime": regime, "htf_trend": htf}
-    elif score <= SELL_SCORE:
+    elif score <= sell_threshold:
         return {"action": "SELL", "score": score, "reason": reason, "atr": current_atr, "regime": regime, "htf_trend": htf}
     return {"action": "HOLD", "score": score, "reason": reason, "atr": current_atr, "regime": regime, "htf_trend": htf}
 

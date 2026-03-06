@@ -16,6 +16,10 @@ body{font-family:-apple-system,system-ui,sans-serif;background:var(--bg);color:v
 
 header{padding:20px 24px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
 .title{font-size:15px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:var(--dim)}
+.mode-badge{padding:3px 10px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:1px;margin-left:10px}
+.mode-badge.PAPER{background:rgba(59,130,246,.15);color:var(--blue)}
+.mode-badge.LIVE{background:rgba(239,68,68,.15);color:var(--red)}
+.mode-badge.DRY-RUN{background:rgba(234,179,8,.15);color:var(--yellow)}
 .status{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dim)}
 .dot{width:6px;height:6px;border-radius:50%;background:var(--green);animation:blink 2s infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
@@ -84,7 +88,17 @@ td:first-child{font-weight:600;color:#fff}
 .chart-btn:hover,.chart-btn.active{color:var(--text);border-color:var(--blue)}
 
 .trades-filter{padding:12px 24px;background:var(--surface);display:flex;gap:12px;align-items:center;border-bottom:1px solid var(--border)}
-.trades-filter select,.trades-filter input{padding:5px 10px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px}
+.trades-filter select{padding:5px 10px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px}
+
+/* Live log */
+.log-container{background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:8px 12px;max-height:300px;overflow-y:auto;font-family:'Cascadia Code','Fira Code',monospace;font-size:11px;line-height:1.6}
+.log-line{display:flex;gap:8px;white-space:nowrap}
+.log-time{color:var(--dim);min-width:55px}
+.log-level{min-width:50px;font-weight:600}
+.log-level.INFO{color:var(--blue)}
+.log-level.WARNING{color:var(--yellow)}
+.log-level.ERROR{color:var(--red)}
+.log-msg{color:var(--text);overflow:hidden;text-overflow:ellipsis}
 
 @media(max-width:640px){.grid{grid-template-columns:1fr}}
 </style>
@@ -92,9 +106,12 @@ td:first-child{font-weight:600;color:#fff}
 <body>
 
 <header>
-  <span class="title">trader bot</span>
+  <div style="display:flex;align-items:center">
+    <span class="title">trader bot</span>
+    <span class="mode-badge PAPER" id="mode-badge">PAPER</span>
+  </div>
   <div class="status">
-    <span class="badge unknown" id="regime-badge">—</span>
+    <span class="badge unknown" id="regime-badge">-</span>
     <span class="dot" id="dot"></span>
     <span id="status-text">connecting</span>
   </div>
@@ -108,6 +125,7 @@ td:first-child{font-weight:600;color:#fff}
   <div class="tab active" data-panel="overview">Overview</div>
   <div class="tab" data-panel="charts">Charts</div>
   <div class="tab" data-panel="trades">Trade History</div>
+  <div class="tab" data-panel="logs">Live Log</div>
 </div>
 
 <!-- OVERVIEW PANEL -->
@@ -163,7 +181,7 @@ td:first-child{font-weight:600;color:#fff}
     <div id="chart-symbols"></div>
   </div>
   <div style="padding:24px;background:var(--surface)">
-    <div class="label">Price Chart</div>
+    <div class="label">Price Chart <span style="font-weight:400;color:var(--dim)">— EMA 9/21 + Bollinger Bands</span></div>
     <div id="chart-container"></div>
   </div>
   <div style="padding:24px;background:var(--surface);border-top:1px solid var(--border)">
@@ -191,6 +209,16 @@ td:first-child{font-weight:600;color:#fff}
   </div>
 </div>
 
+<!-- LOGS PANEL -->
+<div class="panel" id="panel-logs">
+  <div style="padding:24px;background:var(--surface)">
+    <div class="label">Live Log <span style="font-weight:400;color:var(--dim)">— last 50 lines</span></div>
+    <div class="log-container" id="log-container">
+      <div class="empty">Waiting for logs...</div>
+    </div>
+  </div>
+</div>
+
 <script>
 const $=id=>document.getElementById(id);
 const fmt=(n,d=2)=>Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -212,6 +240,8 @@ document.querySelectorAll('.tab').forEach(tab=>{
 
 // Charts
 let priceChart=null, priceSeries=null, volumeSeries=null;
+let ema9Series=null, ema21Series=null;
+let bbUpperSeries=null, bbLowerSeries=null, bbMidSeries=null;
 let equityChart=null, equitySeries=null;
 let currentChartSymbol='BTC/USDT';
 let chartsInitialized=false;
@@ -239,6 +269,15 @@ function initCharts(){
   });
   priceChart.priceScale('vol').applyOptions({scaleMargins:{top:0.8,bottom:0}});
 
+  // EMA overlays
+  ema9Series=priceChart.addLineSeries({color:'#3b82f6',lineWidth:1,title:'EMA9'});
+  ema21Series=priceChart.addLineSeries({color:'#eab308',lineWidth:1,title:'EMA21'});
+
+  // Bollinger Bands
+  bbUpperSeries=priceChart.addLineSeries({color:'rgba(168,85,247,0.4)',lineWidth:1,lineStyle:2,title:'BB+'});
+  bbLowerSeries=priceChart.addLineSeries({color:'rgba(168,85,247,0.4)',lineWidth:1,lineStyle:2,title:'BB-'});
+  bbMidSeries=priceChart.addLineSeries({color:'rgba(168,85,247,0.2)',lineWidth:1,lineStyle:1});
+
   equityChart=LightweightCharts.createChart($('equity-container'),{...chartOpts,height:300});
   equitySeries=equityChart.addAreaSeries({
     topColor:'rgba(59,130,246,0.3)',bottomColor:'rgba(59,130,246,0.02)',
@@ -255,11 +294,26 @@ async function loadChart(symbol){
   try{
     const res=await fetch('/api/ohlcv/'+symbol.replace('/','-'));
     const data=await res.json();
-    if(data.length){
-      priceSeries.setData(data.map(d=>({time:d.time,open:d.open,high:d.high,low:d.low,close:d.close})));
-      volumeSeries.setData(data.map(d=>({time:d.time,value:d.volume,color:d.close>=d.open?'rgba(34,197,94,0.3)':'rgba(239,68,68,0.3)'})));
-      priceChart.timeScale().fitContent();
-    }
+    if(!data.length) return;
+
+    priceSeries.setData(data.map(d=>({time:d.time,open:d.open,high:d.high,low:d.low,close:d.close})));
+    volumeSeries.setData(data.map(d=>({time:d.time,value:d.volume,color:d.close>=d.open?'rgba(34,197,94,0.3)':'rgba(239,68,68,0.3)'})));
+
+    // EMA overlays
+    const ema9Data=data.filter(d=>d.ema9).map(d=>({time:d.time,value:d.ema9}));
+    const ema21Data=data.filter(d=>d.ema21).map(d=>({time:d.time,value:d.ema21}));
+    ema9Series.setData(ema9Data);
+    ema21Series.setData(ema21Data);
+
+    // Bollinger Bands
+    const bbUp=data.filter(d=>d.bb_upper).map(d=>({time:d.time,value:d.bb_upper}));
+    const bbLo=data.filter(d=>d.bb_lower).map(d=>({time:d.time,value:d.bb_lower}));
+    const bbMd=data.filter(d=>d.bb_mid).map(d=>({time:d.time,value:d.bb_mid}));
+    bbUpperSeries.setData(bbUp);
+    bbLowerSeries.setData(bbLo);
+    bbMidSeries.setData(bbMd);
+
+    priceChart.timeScale().fitContent();
   }catch(e){console.error('Chart load error:',e)}
 }
 
@@ -282,8 +336,6 @@ async function loadTrades(){
     const res=await fetch('/api/trades');
     allTrades=await res.json();
     renderTrades();
-
-    // Populate symbol filter
     const syms=[...new Set(allTrades.map(t=>t.symbol))].sort();
     const sel=$('trade-filter-symbol');
     const current=sel.value;
@@ -319,7 +371,6 @@ $('trade-filter-result').addEventListener('change',renderTrades);
 function update(d){
   const p=d.portfolio,m=d.metrics;
 
-  // PnL
   $('pnl').textContent=sign(p.pnl)+'$'+fmt(Math.abs(p.pnl));
   $('pnl').className='big '+cls(p.pnl);
   $('pnl-pct').textContent='('+sign(p.pnl_pct)+fmt(Math.abs(p.pnl_pct),1)+'%)';
@@ -329,7 +380,6 @@ function update(d){
   $('exposure').textContent='$'+fmt(p.exposure);
   $('total').textContent='$'+fmt(p.value);
 
-  // Metrics
   const dp=m.daily_pnl;
   $('daily').textContent=sign(dp)+'$'+fmt(Math.abs(dp));
   $('daily').className='row-value '+cls(dp);
@@ -340,13 +390,18 @@ function update(d){
   $('avg-win').textContent=m.avg_win?'+$'+fmt(m.avg_win):'-';
   $('avg-loss').textContent=m.avg_loss?'-$'+fmt(Math.abs(m.avg_loss)):'-';
 
-  // Regime
   const regime=m.regime||'unknown';
   $('regime-text').textContent=regime;
-  $('regime-text').className='row-value';
   const rb=$('regime-badge');
   rb.textContent=regime;
   rb.className='badge '+regime;
+
+  // Mode badge
+  if(d.config&&d.config.mode){
+    const mb=$('mode-badge');
+    mb.textContent=d.config.mode;
+    mb.className='mode-badge '+d.config.mode;
+  }
 
   // Circuit breaker
   if(d.circuit_breaker){
@@ -391,7 +446,7 @@ function update(d){
     }).join('');
   }
 
-  // Config & chart symbol buttons
+  // Config
   if(d.config){
     const c=d.config;
     $('config-bar').innerHTML=[
@@ -403,7 +458,6 @@ function update(d){
       `<span class="config-item">TP: <strong>${c.atr_tp}x ATR</strong></span>`,
     ].join('');
 
-    // Build chart symbol buttons
     const cs=$('chart-symbols');
     if(!cs.children.length){
       c.symbols.forEach(s=>{
@@ -415,6 +469,16 @@ function update(d){
         cs.appendChild(btn);
       });
     }
+  }
+
+  // Live logs
+  if(d.logs&&d.logs.length){
+    const lc=$('log-container');
+    lc.innerHTML=d.logs.map(l=>{
+      const lvl=l.level||'INFO';
+      return`<div class="log-line"><span class="log-time">${l.time}</span><span class="log-level ${lvl}">${lvl}</span><span class="log-msg">${l.message}</span></div>`;
+    }).join('');
+    lc.scrollTop=lc.scrollHeight;
   }
 }
 

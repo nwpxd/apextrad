@@ -1,14 +1,15 @@
 """
 Dashboard server. Serves HTML + WebSocket updates.
-Includes equity curve, trade history, OHLCV data for charting.
+Includes equity curve, trade history, OHLCV with indicators, live logs.
 """
 
 import asyncio
-import json
 import logging
 from datetime import datetime
 from pathlib import Path
 from aiohttp import web
+
+from bot import strategy as strat
 
 log = logging.getLogger("dashboard")
 
@@ -42,17 +43,15 @@ class DashboardServer:
         return ws
 
     async def _equity(self, request):
-        """Return equity curve data."""
         curve = self.engine.portfolio.equity_curve
         return web.json_response(curve)
 
     async def _trades(self, request):
-        """Return trade history."""
         trades = self.engine.tracker.trades
         return web.json_response(trades)
 
     async def _ohlcv(self, request):
-        """Return OHLCV data for a symbol (for charting)."""
+        """Return OHLCV data with EMA and Bollinger Bands overlay data."""
         symbol = request.match_info["symbol"].replace("-", "/")
         tf = self.engine.config.get("timeframe", "1h")
 
@@ -60,16 +59,36 @@ class DashboardServer:
         if df is None:
             return web.json_response([])
 
+        # Calculate indicators for overlay
+        close = df["close"]
+        ema9 = strat.ema(close, 9)
+        ema21 = strat.ema(close, 21)
+        bb_period = self.engine.config.get("bb_period", 20)
+        bb_std = self.engine.config.get("bb_std", 2.0)
+        bb_mid = strat.sma(close, bb_period)
+        bb_rolling_std = close.rolling(bb_period).std()
+        bb_upper = bb_mid + bb_rolling_std * bb_std
+        bb_lower = bb_mid - bb_rolling_std * bb_std
+
         candles = []
-        for ts, row in df.iterrows():
-            candles.append({
+        for idx, (ts, row) in enumerate(df.iterrows()):
+            entry = {
                 "time": int(ts.timestamp()),
                 "open": float(row["open"]),
                 "high": float(row["high"]),
                 "low": float(row["low"]),
                 "close": float(row["close"]),
                 "volume": float(row["volume"]),
-            })
+            }
+            # Add indicators (skip NaN at start)
+            if idx >= 20:
+                entry["ema9"] = float(ema9.iloc[idx])
+                entry["ema21"] = float(ema21.iloc[idx])
+                entry["bb_upper"] = float(bb_upper.iloc[idx])
+                entry["bb_lower"] = float(bb_lower.iloc[idx])
+                entry["bb_mid"] = float(bb_mid.iloc[idx])
+            candles.append(entry)
+
         return web.json_response(candles)
 
     def _state(self) -> dict:
@@ -102,10 +121,12 @@ class DashboardServer:
                 "regime": s.get("regime", ""),
             })
 
-        # Circuit breaker status
         cb_active = e.circuit_breaker.is_paused()
         cb_remaining = e.circuit_breaker.remaining_pause if cb_active else ""
         cb_consecutive = e.circuit_breaker.consecutive_stops
+
+        # Live log lines
+        live_logs = list(e.log_capture.buffer)
 
         return {
             "portfolio": {
@@ -126,6 +147,7 @@ class DashboardServer:
             },
             "positions": positions,
             "signals": signals,
+            "logs": live_logs,
             "max_positions": e.config.get("max_positions", 5),
             "config": {
                 "symbols": e.config["symbols"],
@@ -134,6 +156,7 @@ class DashboardServer:
                 "risk_per_trade": e.config.get("risk_per_trade_usd", 15),
                 "atr_sl": e.config.get("atr_sl_mult", 2.0),
                 "atr_tp": e.config.get("atr_tp_mult", 4.0),
+                "mode": "DRY-RUN" if e.dry_run else ("LIVE" if e.live else "PAPER"),
             },
         }
 

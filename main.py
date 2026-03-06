@@ -2,8 +2,10 @@
 Trader Bot
   Paper:     python main.py --limit 1000
   Live:      python main.py --limit 1000 --live
+  Dry-run:   python main.py --limit 1000 --live --dry-run
   Dashboard: python main.py --limit 1000 --dashboard
   Backtest:  python main.py --backtest --months 6
+  Optimize:  python main.py --optimize --months 6
 """
 
 import asyncio
@@ -47,8 +49,11 @@ DEFAULT_CONFIG = {
     "reconcile_interval": 3600,
     "retry_max": 3,
     "retry_base_delay": 2,
+    "max_spread_pct": 0.3,
+    "min_volume_ratio": 0.30,
     "backtest_months": 6,
     "backtest_initial_capital": 1000,
+    "discord_webhook": "",
 }
 
 
@@ -67,15 +72,23 @@ async def run_backtest(config: dict, months: int):
     await bt.run(months)
 
 
+async def run_optimize(config: dict, months: int):
+    from bot.backtest import Backtester
+    bt = Backtester(config)
+    await bt.optimize(months)
+
+
 async def main():
     parser = argparse.ArgumentParser(description="Trader Bot")
     parser.add_argument("--limit", type=float, default=1000, help="Capital in USD")
     parser.add_argument("--config", default="config.yaml", help="Config file")
     parser.add_argument("--live", action="store_true", help="Live trading (requires .env)")
+    parser.add_argument("--dry-run", action="store_true", help="Live data but no real orders")
     parser.add_argument("--dashboard", action="store_true", help="Web dashboard")
     parser.add_argument("--port", type=int, default=8080, help="Dashboard port")
     parser.add_argument("--backtest", action="store_true", help="Run backtester")
-    parser.add_argument("--months", type=int, default=6, help="Backtest months (default: 6)")
+    parser.add_argument("--optimize", action="store_true", help="Run parameter optimizer")
+    parser.add_argument("--months", type=int, default=6, help="Backtest/optimize months")
     args = parser.parse_args()
 
     # Logging
@@ -94,6 +107,7 @@ async def main():
     config = load_config(args.config)
     config["capital"] = args.limit
     config["live"] = args.live
+    config["dry_run"] = args.dry_run
 
     config["binance_api_key"] = os.getenv("BINANCE_API_KEY", "")
     config["binance_secret"] = os.getenv("BINANCE_SECRET", "")
@@ -111,8 +125,26 @@ async def main():
         await run_backtest(config, args.months)
         return
 
-    # Live/Paper mode
-    mode = "LIVE" if args.live else "PAPER"
+    # Optimize mode
+    if args.optimize:
+        config["backtest_initial_capital"] = args.limit
+        log.info("=" * 45)
+        log.info(f"  OPTIMIZE MODE")
+        log.info(f"  Capital:  ${args.limit:,.0f}")
+        log.info(f"  Months:   {args.months}")
+        log.info(f"  Symbols:  {len(config['symbols'])} pairs")
+        log.info("=" * 45)
+        await run_optimize(config, args.months)
+        return
+
+    # Live/Paper/Dry-run mode
+    if args.dry_run:
+        mode = "DRY-RUN"
+    elif args.live:
+        mode = "LIVE"
+    else:
+        mode = "PAPER"
+
     log.info("=" * 45)
     log.info(f"  Mode:     {mode}")
     log.info(f"  Capital:  ${args.limit:,.0f}")
@@ -120,6 +152,8 @@ async def main():
     log.info(f"  Strategy: EMA + RSI + MACD + ADX + BB")
     log.info(f"  Risk:     ${config['risk_per_trade_usd']} per trade (ATR-based)")
     log.info(f"  API key:  {'loaded' if config['binance_api_key'] else 'none'}")
+    if config.get("discord_webhook"):
+        log.info(f"  Discord:  enabled")
     log.info("=" * 45)
 
     if args.live and not config["binance_api_key"]:

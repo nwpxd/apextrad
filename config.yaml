@@ -37,6 +37,17 @@ trail_phase1_r: 1.0           # 0-1R: move stop to breakeven
 trail_phase2_r: 2.0           # 1-2R: trail at 1x ATR
 trail_phase3_atr: 0.75        # >2R: trail tight at 0.75x ATR
 
+# Signal thresholds (tune after backtest/optimize)
+buy_score: 0.35               # min composite score to trigger BUY
+sell_score: -0.30              # max composite score to trigger SELL
+
+# Spread & volume filters
+max_spread_pct: 0.3            # block trades if bid-ask spread > 0.3%
+min_volume_ratio: 0.30         # skip if volume < 30% of 20-period avg
+
+# Notifications
+discord_webhook: ""            # Discord webhook URL (leave empty to disable)
+
 # Execution
 use_limit_orders: false       # true = limit orders (less slippage), false = market
 limit_order_offset_pct: 0.05  # limit price offset from market (0.05%)

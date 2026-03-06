@@ -1,18 +1,23 @@
 """
-Portfolio state with progressive trailing stops.
+Portfolio state with progressive trailing stops and crash recovery.
 
 Trailing stop phases:
   Phase 1 (0 to 1R profit): move stop to breakeven
   Phase 2 (1R to 2R profit): trail at 1x ATR behind high
   Phase 3 (>2R profit):      trail tight at 0.75x ATR behind high
+
+State is persisted to logs/state.json after every trade for crash recovery.
 """
 
+import json
 import logging
 from decimal import Decimal
 from datetime import datetime
+from pathlib import Path
 from bot import risk
 
 log = logging.getLogger("portfolio")
+STATE_FILE = Path("logs/state.json")
 
 
 class Portfolio:
@@ -21,10 +26,9 @@ class Portfolio:
         self.cash = Decimal(str(capital))
         self.positions: dict[str, dict] = {}
         self.cooldowns: dict[str, datetime] = {}
-        self.equity_curve: list[dict] = []  # {time, value}
+        self.equity_curve: list[dict] = []
 
     def buy(self, symbol: str, price: Decimal, size_usd: Decimal, atr: float, config: dict | None = None):
-        """Buy with ATR-based dynamic stops and progressive trailing config."""
         if config is None:
             config = {}
 
@@ -43,7 +47,7 @@ class Portfolio:
 
         stop_loss = price - atr_d * sl_mult
         take_profit = price + atr_d * tp_mult
-        risk_per_unit = atr_d * sl_mult  # 1R = this distance
+        risk_per_unit = atr_d * sl_mult
 
         self.cash -= cost
         self.positions[symbol] = {
@@ -67,6 +71,7 @@ class Portfolio:
             f"SL ${stop_loss:,.2f} | TP ${take_profit:,.2f} | "
             f"1R = ${risk_per_unit:,.2f}"
         )
+        self.save_state()
         return True
 
     def sell(self, symbol: str, price: Decimal, reason: str = "") -> Decimal:
@@ -84,10 +89,10 @@ class Portfolio:
         if reason == "stop_loss":
             self.cooldowns[symbol] = datetime.now()
 
+        self.save_state()
         return pnl
 
     def update_price(self, symbol: str, price: Decimal):
-        """Update price and manage progressive trailing stop."""
         pos = self.positions.get(symbol)
         if not pos:
             return
@@ -103,29 +108,25 @@ class Portfolio:
         profit = price - entry
         r_multiple = profit / risk_1r if risk_1r > 0 else Decimal("0")
 
-        # Phase 1: profit reached 1R → move stop to breakeven
         if pos["trail_phase"] < 1 and r_multiple >= pos["trail_phase1_r"]:
             pos["trail_phase"] = 1
-            new_stop = entry + atr_d * Decimal("0.1")  # breakeven + tiny buffer
+            new_stop = entry + atr_d * Decimal("0.1")
             if new_stop > pos["stop_loss"]:
                 pos["stop_loss"] = new_stop
-                log.info(f"TRAIL P1 {symbol} | stop → breakeven ${new_stop:,.2f}")
+                log.info(f"TRAIL P1 {symbol} | stop -> breakeven ${new_stop:,.2f}")
 
-        # Phase 2: profit reached 2R → trail at 1x ATR
         if pos["trail_phase"] < 2 and r_multiple >= pos["trail_phase2_r"]:
             pos["trail_phase"] = 2
             log.info(f"TRAIL P2 {symbol} | trailing at 1x ATR")
 
-        # Apply trailing based on current phase
         if pos["trail_phase"] >= 2:
             if r_multiple >= pos["trail_phase2_r"] * 2:
-                # Phase 3: tight trail at 0.75x ATR
                 trail_distance = atr_d * pos["trail_phase3_atr"]
                 if pos["trail_phase"] < 3:
                     pos["trail_phase"] = 3
                     log.info(f"TRAIL P3 {symbol} | tight trail at {pos['trail_phase3_atr']}x ATR")
             else:
-                trail_distance = atr_d  # 1x ATR
+                trail_distance = atr_d
 
             trail_stop = pos["high_since_entry"] - trail_distance
             if trail_stop > pos["stop_loss"]:
@@ -156,9 +157,82 @@ class Portfolio:
             "time": datetime.now().isoformat(),
             "value": float(self.value),
         })
-        # Keep last 10000 points
         if len(self.equity_curve) > 10000:
             self.equity_curve = self.equity_curve[-10000:]
+
+    # ── State persistence ──
+
+    def save_state(self):
+        """Save portfolio state for crash recovery."""
+        try:
+            state = {
+                "cash": str(self.cash),
+                "initial": str(self.initial),
+                "positions": {},
+                "cooldowns": {s: t.isoformat() for s, t in self.cooldowns.items()},
+                "saved_at": datetime.now().isoformat(),
+            }
+            for sym, pos in self.positions.items():
+                state["positions"][sym] = {
+                    "entry": str(pos["entry"]),
+                    "quantity": str(pos["quantity"]),
+                    "cost": str(pos["cost"]),
+                    "current": str(pos["current"]),
+                    "high_since_entry": str(pos["high_since_entry"]),
+                    "stop_loss": str(pos["stop_loss"]),
+                    "take_profit": str(pos["take_profit"]),
+                    "atr": str(pos["atr"]),
+                    "risk_1r": str(pos["risk_1r"]),
+                    "trail_phase": pos["trail_phase"],
+                    "trail_phase1_r": str(pos["trail_phase1_r"]),
+                    "trail_phase2_r": str(pos["trail_phase2_r"]),
+                    "trail_phase3_atr": str(pos["trail_phase3_atr"]),
+                    "opened": pos["opened"].isoformat(),
+                }
+
+            STATE_FILE.parent.mkdir(exist_ok=True)
+            STATE_FILE.write_text(json.dumps(state, indent=2))
+        except Exception as e:
+            log.warning(f"Failed to save state: {e}")
+
+    def load_state(self) -> bool:
+        """Load portfolio state from disk. Returns True if state was loaded."""
+        try:
+            if not STATE_FILE.exists():
+                return False
+
+            raw = json.loads(STATE_FILE.read_text())
+            self.cash = Decimal(raw["cash"])
+            self.initial = Decimal(raw["initial"])
+
+            for sym, pos_data in raw.get("positions", {}).items():
+                self.positions[sym] = {
+                    "entry": Decimal(pos_data["entry"]),
+                    "quantity": Decimal(pos_data["quantity"]),
+                    "cost": Decimal(pos_data["cost"]),
+                    "current": Decimal(pos_data["current"]),
+                    "high_since_entry": Decimal(pos_data["high_since_entry"]),
+                    "stop_loss": Decimal(pos_data["stop_loss"]),
+                    "take_profit": Decimal(pos_data["take_profit"]),
+                    "atr": Decimal(pos_data["atr"]),
+                    "risk_1r": Decimal(pos_data["risk_1r"]),
+                    "trail_phase": pos_data["trail_phase"],
+                    "trail_phase1_r": Decimal(pos_data["trail_phase1_r"]),
+                    "trail_phase2_r": Decimal(pos_data["trail_phase2_r"]),
+                    "trail_phase3_atr": Decimal(pos_data["trail_phase3_atr"]),
+                    "opened": datetime.fromisoformat(pos_data["opened"]),
+                }
+
+            for sym, ts in raw.get("cooldowns", {}).items():
+                self.cooldowns[sym] = datetime.fromisoformat(ts)
+
+            n = len(self.positions)
+            log.info(f"State loaded: ${self.cash:,.2f} cash, {n} positions")
+            return True
+
+        except Exception as e:
+            log.warning(f"Failed to load state: {e}")
+            return False
 
     @property
     def exposure(self) -> Decimal:

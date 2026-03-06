@@ -11,14 +11,39 @@ symbols:
   - LINK/USDT
 
 timeframe: "1h"
-scan_interval: 60          # seconds between scans
+htf: "4h"                     # higher timeframe for trend confirmation
+scan_interval: 60             # seconds between scans
 
 # Risk management
-max_positions: 5           # max simultaneous positions
-risk_per_trade: 0.05       # 5% of portfolio per trade
-max_daily_loss: 0.05       # halt trading if down 5% in a day
+max_positions: 5              # max simultaneous positions
+risk_per_trade_usd: 15        # fixed $ risk per trade (sized via ATR)
+max_correlated: 2             # max altcoins if BTC already in position
+max_daily_loss: 0.05          # halt trading if down 5% in a day
+circuit_breaker: 3            # consecutive stop-losses before 4h pause
 
-# Stop-loss and take-profit are dynamic (ATR-based):
-#   SL = entry - 2x ATR  (adapts to volatility)
-#   TP = entry + 4x ATR  (2:1 risk/reward ratio)
-#   Trailing stop activates after 2x ATR profit
+# Strategy params
+adx_period: 14
+adx_trend_threshold: 25       # ADX > 25 = trending
+adx_range_threshold: 20       # ADX < 20 = ranging
+bb_period: 20                 # Bollinger Bands period
+bb_std: 2.0                   # Bollinger Bands std dev
+
+# Stop-loss and take-profit (ATR-based):
+atr_sl_mult: 2.0              # SL = entry - 2x ATR
+atr_tp_mult: 4.0              # TP = entry + 4x ATR (2:1 R/R)
+
+# Trailing stop phases (profit in multiples of R)
+trail_phase1_r: 1.0           # 0-1R: move stop to breakeven
+trail_phase2_r: 2.0           # 1-2R: trail at 1x ATR
+trail_phase3_atr: 0.75        # >2R: trail tight at 0.75x ATR
+
+# Execution
+use_limit_orders: false       # true = limit orders (less slippage), false = market
+limit_order_offset_pct: 0.05  # limit price offset from market (0.05%)
+reconcile_interval: 3600      # reconcile with Binance every hour (seconds)
+retry_max: 3                  # max retries on network error
+retry_base_delay: 2           # base delay for exponential backoff (seconds)
+
+# Backtest defaults
+backtest_months: 6
+backtest_initial_capital: 1000
